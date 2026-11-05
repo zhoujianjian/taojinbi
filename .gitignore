@@ -1,0 +1,14 @@
+# 调试截图与日志
+logs/
+_tmp/
+*.png
+
+# 界面控件树导出（临时）
+*.xml
+
+# 项目本地记忆
+.workbuddy/
+
+# Python
+__pycache__/
+*.pyc

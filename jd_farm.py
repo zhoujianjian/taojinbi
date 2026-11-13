@@ -27,11 +27,20 @@
 import os
 import re
 import sys
+import signal
 import time
 import datetime
 import threading
 
 import jingdong as base
+
+# 计划任务在共享控制台里跑，外部控制台事件（CTRL_C_EVENT）会误杀脚本。
+# 非交互环境下忽略 SIGINT，保证每天定时跑完；手动 Ctrl+C 仍可中断。
+try:
+    if not sys.stdin.isatty():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+except Exception:
+    pass
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

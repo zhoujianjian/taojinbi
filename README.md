@@ -82,33 +82,53 @@ python taojinbi_adb.py --no-task
 
 ## 每天定时自动运行
 
-用 Windows 任务计划，每天 9:00 自动执行：
+用 Windows 任务计划，每天 9:00 自动执行。**推荐用 PowerShell 注册**（比 `schtasks` 稳，
+某些安全策略会把 `schtasks.exe` 列入黑名单直接拦掉）：
 
-```cmd
-schtasks /Create /TN "Taobao_Taojinbi_Daily" /TR "\"D:\taojinbi\run_taojinbi.bat\"" /SC DAILY /ST 09:00 /F
+以管理员身份打开 PowerShell，粘贴执行：
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "D:\taojinbi\run_taojinbi.bat"
+$trigger = New-ScheduledTaskTrigger -Daily -At 09:00
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+Register-ScheduledTask -TaskName "Taobao_Taojinbi_Daily" -Action $action -Trigger $trigger -Settings $settings -Force
 ```
 
-（把路径换成你实际存放本项目的目录）
+（把 `D:\taojinbi\` 换成你实际存放本项目的目录）
+
+查看 / 删除：
+
+```powershell
+Get-ScheduledTaskInfo -TaskName "Taobao_Taojinbi_Daily"     # 看下次运行时间、上次结果
+Unregister-ScheduledTask -TaskName "Taobao_Taojinbi_Daily" -Confirm:$false   # 删掉
+```
 
 **注意**：
 
 - 手机要保持插着 USB 且 ADB 授权有效
 - 手机必须是解锁状态；设了锁屏密码的话脚本叫不醒它，
   需要把锁屏去掉或改为无密码
-- 如果电脑当时关机/睡眠，当天就不会跑
+- 如果电脑当时关机/睡眠，`StartWhenAvailable` 会在开机后补跑一次
+- 整个流程要跑 4~5 分钟（浏览类任务每项要滑 22 秒），期间不要碰手机
 
 ## 脚本行为细节
 
-- **弹窗处理**：自动关闭 PK 赛等活动的弹窗、定位权限弹窗
-  （淘宝定位权限已通过 `adb shell appops set com.taobao.taobao FINE_LOCATION ignore` 设为忽略）
+- **入口文案兼容**：淘宝的入口文案一直在变（`去赚金币` → `赚更多金币` → `快速赚`），
+  脚本按 `TASK_ENTRY` 里的关键词依次匹配，不用改代码
+- **自动滚回顶部**：淘宝会记住上次的滚动位置，进页面后脚本先滑回顶部再找按钮
+- **弹窗处理**：只有「看不到页面主体」时才判定为全屏广告并用返回键关闭，
+  避免把页面正文里的活动文案（如"加抵金"）误判成弹窗
 - **昨日补领**：淘金币页出现「昨日未领」时会自动点掉
 - **任务识别**：按「金币徽章 + 上方标题行」的面板结构识别任务，不依赖任务名
   （淘宝会轮换任务名称，按名字找会失效）
 - **支付宝类任务跳过**：蚂蚁庄园、支付宝农场、蚂蚁森林一律不点，
-  因为会跳到支付宝 App 导致回不来（可在 `taojinbi_adb.py` 的 `SKIP_WORDS` 里调整）
+  因为会跳到支付宝 App 导致回不来；答题类、搜索类也跳过
+  （在 `taojinbi_adb.py` 的 `SKIP_WORDS` 里可调整）
 - **完成检测**：浏览任务靠 OCR 识别「已得 ⓒxx」「任务完成」等提示确认完成，
   没检测到会补 10 秒再确认一次
-- **兜底**：找不到按钮会先按返回键重试，重启淘宝重进
+- **领取奖励**：只在淘金币页/任务面板里点「领取」，
+  跳过「免费领取」「试用领取」这类会跳转广告页的按钮
+- **兜底**：找不到按钮会先按返回键重试，必要时重启淘宝重进
 
 ## 文件说明
 
@@ -132,8 +152,9 @@ schtasks /Create /TN "Taobao_Taojinbi_Daily" /TR "\"D:\taojinbi\run_taojinbi.bat
 输出「没有可做的任务了」然后正常结束，不会重复点击。
 
 **Q: 换了手机 / 分辨率不一样？**
-不用改代码——所有点击坐标都是 OCR 现场算的，唯一写死的坐标是弹窗关闭 X
-的兜底位置 `POPUP_CLOSE_XY`，如果你的手机分辨率不是 1080x2400，需要微调这一个值。
+基本不用改——所有点击坐标都是 OCR 现场按文字位置算的，
+只有「图标在文字标签上方多少像素」这类偏移量写死（`COIN_ICON_OFFSET = 60`），
+换分辨率差别大的手机时可能需要微调这个值。
 
 ## 风险提示
 

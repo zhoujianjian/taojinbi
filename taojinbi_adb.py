@@ -65,6 +65,13 @@ def swipe_up(times=1, dist=700, dur=350):
         time.sleep(1.2)
 
 
+def scroll_top(times=3):
+    """把当前页滚回顶部（淘宝会记住上次的滚动位置）"""
+    for _ in range(times):
+        adb("shell", "input", "swipe", "540", "600", "540", "1900", "300")
+        time.sleep(0.9)
+
+
 def dwell(seconds):
     """浏览计时：必须持续滑动才会累计（实测间隔 1.2 秒、短距离滑动有效）"""
     log("    停留 %d 秒（持续滑动计时）" % seconds)
@@ -207,6 +214,21 @@ def find_all(items, keyword):
     return sorted(out, key=lambda t: t[2])
 
 
+def label_pos(items, keyword):
+    """按字符比例定位关键字位置。
+    OCR 会把相邻图标标签合并成一行（如「芭芭农场领淘金币」），
+    直接用整行中心会点偏，必须按字符占比算。"""
+    for it in items:
+        if it[3] == "L" and keyword in it[0]:
+            pos = _char_pos(it, keyword)
+            if pos:
+                return pos
+    for it in items:
+        if it[3] == "W" and keyword in it[0]:
+            return (it[1], it[2], keyword)
+    return None
+
+
 def shot(tag):
     src = os.path.join(LOG_DIR, "shot_%s_%s.png"
                        % (datetime.datetime.now().strftime("%m%d_%H%M%S"), tag))
@@ -218,7 +240,7 @@ def shot(tag):
 
 
 def dismiss(items):
-    """关弹窗：先找带文字的关闭/跳过，再对无文字弹窗盲点固定 X 坐标"""
+    """关弹窗：先找带文字的关闭/跳过；全屏广告页用返回键关（不再盲点固定坐标，容易点进直播间）"""
     for _ in range(4):
         hit = find(items, *POPUPS)
         if hit:
@@ -226,10 +248,14 @@ def dismiss(items):
             time.sleep(2)
             items = screen()
             continue
+
         popup = find(items, *POPUP_KEYS)
-        if popup:
-            tap(POPUP_CLOSE_XY[0], POPUP_CLOSE_XY[1], "关活动弹窗:" + popup[2])
-            time.sleep(2)
+        # 只有「看不到页面主体」时才当成真弹窗，避免把页面正文里的活动文案误判
+        covered = not (is_coin_page(items) or is_task_panel(items) or find(items, "我的淘宝", "首页"))
+        if popup and covered:
+            log("    疑似全屏活动弹窗（%s），按返回键关闭" % popup[2])
+            adb("shell", "input", "keyevent", "KEYCODE_BACK")
+            time.sleep(2.5)
             items = screen()
             continue
         return items
@@ -246,59 +272,50 @@ def is_task_panel(items):
 
 # ---------------- 各步骤 ----------------
 
+COIN_ICON_OFFSET = 60          # 「领淘金币」图标在文字标签上方约 60px
+
+
 def open_coin_page():
     log("[1/5] 回到淘宝并进入淘金币页")
-    items = []
-    for _ in range(5):
-        items = screen()
-        if find(items, "领淘金币", "我的淘宝"):
-            break
-        back(1, 2)
-    else:
-        log("  重启淘宝")
-        adb("shell", "monkey", "-p", "com.taobao.taobao",
-            "-c", "android.intent.category.LAUNCHER", "1")
-        time.sleep(12)
-        items = screen()
-
-    items = dismiss(items)
-    if is_task_panel(items):        # 上次残留的任务面板，先关掉
-        back(1, 2)
-        items = dismiss(screen())
+    ensure_taobao()
+    items = dismiss(screen())
     if is_coin_page(items):
         log("  已经在淘金币页")
+        scroll_top()
         return True
 
-    hit = find(items, "领淘金币")
-    candidates = []
-    if hit:
-        x, y, kw = hit
-        line = [it[0] for it in items if it[3] == "L" and kw in it[0]]
-        if line and "农场" in line[0]:      # 我的淘宝页图标行：第 2 个是领淘金币
-            x = 389
-        candidates.append((x, y - 55, "领淘金币图标"))
-    my = find(items, "我的淘宝")
-    if my:
-        candidates.append((my[0], my[1], "我的淘宝tab"))
-
-    for x, y, name in candidates:
-        tap(x, y, name)
-        # 淘金币页加载慢，轮询最多 21 秒
-        for _ in range(7):
-            time.sleep(3)
+    for attempt in range(4):
+        if is_task_panel(items):          # 上次残留的任务面板，先关掉
+            back(1, 2)
             items = dismiss(screen())
-            if is_coin_page(items):
-                log("  已进入淘金币页")
-                return True
-        inner = find(items, "领淘金币")
-        if inner and name == "我的淘宝tab":
-            tap(389, inner[1] - 55, "我的淘宝页内领淘金币")
-            for _ in range(7):
+            continue
+
+        hit = label_pos(items, "领淘金币")
+        if hit:
+            tap(hit[0], hit[1] - COIN_ICON_OFFSET, "领淘金币图标")
+            for _ in range(6):            # 淘金币页加载慢，最多等 18 秒
                 time.sleep(3)
                 items = dismiss(screen())
                 if is_coin_page(items):
                     log("  已进入淘金币页")
+                    scroll_top()
+                    time.sleep(1)
                     return True
+            log("  点了图标没进去，重试")
+            continue
+
+        my = find(items, "我的淘宝")
+        if my:
+            tap(my[0], my[1], "我的淘宝tab")
+        else:
+            back(1, 2.5)
+        time.sleep(4)
+        items = dismiss(screen())
+        if is_coin_page(items):
+            log("  已进入淘金币页")
+            scroll_top()
+            time.sleep(1)
+            return True
 
     log("  [X] 没进到淘金币页")
     return False
@@ -336,23 +353,42 @@ def claim_yesterday_and_sign():
     return False
 
 
+TASK_ENTRY = ("赚更多金币", "去赚金币", "赚金币", "快速赚", "赚能量")
+
+
 def open_task_panel():
     ensure_taobao()
     items = dismiss(screen())
     if is_task_panel(items):
         return items
-    hit = find(items, "去赚金币")
-    if not hit:
-        back(1, 2.5)          # 可能停在别的二级页，退一级再试
-        items = dismiss(screen())
-        hit = find(items, "去赚金币")
-    if not hit:
-        log("  找不到「去赚金币」")
-        return None
-    tap(hit[0], hit[1], "去赚金币")
-    time.sleep(5)
+    scroll_top(2)                     # 入口按钮在页面顶部
     items = dismiss(screen())
-    return items if is_task_panel(items) else None
+
+    for attempt in range(3):
+        hit = None
+        for kw in TASK_ENTRY:
+            hit = label_pos(items, kw)
+            if hit:
+                break
+        if hit:
+            tap(hit[0], hit[1], "任务入口:" + hit[2])
+            time.sleep(5)
+            items = dismiss(screen())
+            if is_task_panel(items):
+                return items
+            log("  点了「%s」但没打开任务面板" % hit[2])
+        else:
+            log("  页面上没有任务入口文案")
+
+        if attempt == 0:
+            open_coin_page()          # 可能不在淘金币页，重新进
+            items = dismiss(screen())
+        elif attempt == 1:
+            back(1, 2.5)
+            items = dismiss(screen())
+
+    log("  找不到任务面板入口")
+    return None
 
 
 def panel_home(items):
@@ -384,7 +420,10 @@ def parse_tasks(items):
     return sorted(rows)
 
 
-SKIP_WORDS = ("支付宝", "蚂蚁", "趣味课堂", "答题")   # 跳转支付宝 / 需要答题的任务，不做
+SKIP_WORDS = ("支付宝", "蚂蚁", "趣味课堂", "答题", "搜一搜",
+              "任务到访", "每日来任务面板")   # 支付宝跳转 / 答题 / 搜索 / 面板说明行，不做
+CLAIM_BAN = ("免费领取", "试用领取", "去领取", "领券", "领取红包",
+             "领取权益", "领取使用", "领取优惠")
 
 
 def run_tasks():
@@ -479,12 +518,20 @@ def claim_rewards():
     last = None
     repeat = 0
     for _ in range(8):
-        items = screen()
+        items = dismiss(screen())
+        # 只在淘金币页/任务面板里领，避免点到首页广告的「免费领取」跳到别处
+        if not (is_coin_page(items) or is_task_panel(items)):
+            log("  不在淘金币页，跳过领取")
+            break
         hit = None
-        for text, x, y in [(it[0], it[1], it[2]) for it in items]:
-            if "领取" in text and "去领取" not in text and "领券" not in text:
-                hit = (text, x, y)
-                break
+        for it in items:
+            text = it[0]
+            if "领取" not in text:
+                continue
+            if any(b in text for b in CLAIM_BAN):
+                continue
+            hit = (text, it[1], it[2])
+            break
         if not hit:
             break
         # 同一坐标连续命中说明点不动，直接停
@@ -497,7 +544,6 @@ def claim_rewards():
         tap(hit[1], hit[2], "领取:" + hit[0][:8])
         claimed += 1
         time.sleep(3)
-        dismiss(screen())
     log("  领取 %d 个" % claimed)
     return claimed
 

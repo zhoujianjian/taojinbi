@@ -7,13 +7,17 @@
   2) 进入「淘金币」页
   3) 补领「昨日未领」，点「签到」
   4) 点「去赚金币」→ 今日速赚面板 → 按行扫描逐项做任务
-  5) 领取页面上出现的「领取」奖励
+  5) 「更多专享福利」：展开「更多金币等你赚」→ 做带「去完成」的浏览任务
+  6) 领取页面上出现的「领取」奖励
 
 关键实现：
   * 浏览类任务必须"持续滑动"才会计时 → dwell() 每 1.2 秒滑一次
   * 任务完成以页面顶部文案为准（已得/任务完成/已完成…）→ browse_task()
   * 跳过会跳转支付宝的任务（蚂蚁庄园/支付宝农场/蚂蚁森林）和答题类任务
   * 任务名称会轮换（如"精致面霜"→"搜一搜你心仪的宝贝"），所以按面板行结构识别，不认名字
+  * 「更多专享福利」任务在「今日速赚」面板底部，需先点「展开∨」才露出；
+    它们是「逛 5 秒」类浏览任务，跳淘内页面，完成后自动从列表消失（无需领取）；
+    单个任务停留 9 秒确认不了就跳过下一个（按用户要求失败即跳）
 
 用法：
   python taojinbi_adb.py            执行
@@ -24,6 +28,7 @@
 """
 
 import os
+import re
 import sys
 import time
 import signal
@@ -283,7 +288,10 @@ def is_coin_page(items):
 
 
 def is_task_panel(items):
-    return bool(find(items, "今日速赚", "完成下方任务", "任务面板"))
+    # 标题「今日速赚370淘金币」常被 OCR 误读成「今日速贝兼…」，故用「今日速」前缀；
+    # 不能用「速赚」，会误命中首页「快速赚」签到卡片
+    return bool(find(items, "今日速赚", "今日速", "完成下方任务",
+                     "任务面板", "为你找到最简单的任务"))
 
 
 # ---------------- 各步骤 ----------------
@@ -369,7 +377,9 @@ def claim_yesterday_and_sign():
     return False
 
 
-TASK_ENTRY = ("赚更多金币", "去赚金币", "赚金币", "快速赚", "赚能量")
+# 注意：「快速赚」是签到卡片不是面板入口，不能再作为入口关键词
+# 「更多金币」能命中被 OCR 误读的「贝兼更多金币」大按钮
+TASK_ENTRY = ("更多金币", "赚更多金币", "去赚金币", "赚金币", "赚能量")
 
 
 def open_task_panel():
@@ -394,7 +404,15 @@ def open_task_panel():
                 return items
             log("  点了「%s」但没打开任务面板" % hit[2])
         else:
-            log("  页面上没有任务入口文案")
+            # OCR 没认出入口文字时，按固定坐标点「赚更多金币」大按钮
+            # （1080x2400 实测中心 ≈ 539,615；标题常被误读成「贝兼更多金币」）
+            log("  OCR 没认出入口，按坐标点「赚更多金币」")
+            tap(539, 615, "赚更多金币(坐标)")
+            time.sleep(5)
+            items = dismiss(screen())
+            if is_task_panel(items):
+                return items
+            log("  坐标点击也没打开任务面板")
 
         if attempt == 0:
             open_coin_page()          # 可能不在淘金币页，重新进
@@ -501,6 +519,186 @@ def run_tasks():
     return done
 
 
+# ---------------- 更多专享福利（展开区的浏览任务） ----------------
+#
+# 「今日速赚」面板底部有「更多金币等你赚 / 展开∨」一行，点「展开」后
+# 会露出一批带「去完成」按钮的福利任务（如「去芭芭农场逛一逛」「查看更
+# 多巅峰价爆款」）。这些是「逛 5 秒」类浏览任务，跳的是淘内页面，完成后
+# 任务会直接从列表消失（无需领取）。另有一行「下单可得最高13700淘金币」
+# 是下单类、没有「去完成」按钮，自然不会被点到。
+
+def welfare_rows(items):
+    """解析展开区里带「去完成」按钮的任务行 → [(按钮y, 按钮x, 任务标题)]。
+    按钮只在右侧列（x>800）。任务标题取按钮左上方紧贴的一行文字，
+    并排除「浏览5秒 +50」这类奖励副标题。"""
+    rows = []
+    for it in items:
+        if it[3] != "L" or it[0] != "去完成":
+            continue
+        bx, by = it[1], it[2]
+        if bx < 800:
+            continue
+        cands = []
+        for (text, x, y, kind, box) in items:
+            if kind != "L" or x >= bx or not (0 < by - y < 130):
+                continue
+            if len(text.strip("0123456789+/（）() ")) < 5:
+                continue
+            cands.append((y, text))
+        if not cands:
+            continue
+        cands.sort()                       # 升序，标题在最上方
+        names = [(y, t) for y, t in cands
+                 if not re.search(r"浏览.*\d|\+\d", t) and not t[:1].isdigit()]
+        title = names[0][1] if names else cands[0][1]
+        rows.append((by, bx, title))
+    return sorted(rows)
+
+
+def ensure_welfare_panel():
+    """确保任务面板已打开且已展开「更多金币等你赚」。
+    返回面板 items；打不开返回 None。"""
+    items = dismiss(screen())
+    if not is_task_panel(items):
+        if not open_task_panel():
+            return None
+        items = dismiss(screen())
+    if not welfare_rows(items):
+        hit = find(items, "展开")
+        if hit:
+            tap(hit[0], hit[1], "展开")
+            time.sleep(4)
+            items = dismiss(screen())
+    return items
+
+
+WELFARE_SKIP = ("支付宝", "蚂蚁", "下单", "淘宝直播", "逛直播间")
+
+
+def run_welfare_tasks():
+    log("[3.5/5] 做「更多专享福利」任务")
+    items = ensure_welfare_panel()
+    if not items:
+        log("  打不开面板 / 没找到专享福利，跳过")
+        return 0
+
+    done = 0
+    failed = {}        # 标题前缀 -> 已尝试次数（失败一次就跳过，不重试）
+    scrolled = 0
+    for _ in range(20):
+        items = dismiss(screen())
+        if not is_task_panel(items):
+            items = ensure_welfare_panel()
+            if not items:
+                break
+        rows = welfare_rows(items)
+        if not rows:
+            hit = find(items, "展开")
+            if hit:
+                tap(hit[0], hit[1], "展开")
+                time.sleep(4)
+                items = dismiss(screen())
+                rows = welfare_rows(items)
+            if not rows:
+                if scrolled < 3:       # 任务可能在面板更下方，下滑再找
+                    scroll_panel_down()
+                    scrolled += 1
+                    continue
+                log("  没有可做的专享福利任务了")
+                break
+
+        target = None
+        for by, bx, title in rows:
+            if any(w in title for w in WELFARE_SKIP):
+                continue
+            key = title[:8]
+            if failed.get(key, 0) >= 1:
+                continue
+            target = (by, bx, title, key)
+            break
+        if not target:
+            if scrolled < 3:           # 剩下的都跳过/失败时，下滑看看下方有没有新任务
+                scroll_panel_down()
+                scrolled += 1
+                continue
+            log("  剩余任务均跳过或已尝试，结束专享福利")
+            break
+
+        by, bx, title, key = target
+        tap(bx, by, "去完成:" + title[:12])
+        time.sleep(3)
+        # 跳到外部 App（支付宝等）的任务直接放弃
+        if get_focus_package() != "com.taobao.taobao":
+            log("  跳转到外部 App，跳过: " + title[:12])
+            ensure_taobao()
+            failed[key] = failed.get(key, 0) + 1
+            continue
+
+        # 福利任务本质是「逛 5 秒」，绝大多数 9 秒内就能确认完成；
+        # 不补 10 秒，确认不了就按用户要求直接跳下一个，省时间
+        log("   任务：" + title[:12])
+        dwell(9)
+        after = screen()
+        hit = find(after, *DONE_MARKS)
+        if hit:
+            log("    [完成] 检测到提示：" + hit[2])
+        else:
+            log("    [未确认] 没看到完成提示，稍后按列表判定")
+        items = return_to_panel()
+        if not is_task_panel(items):
+            # 没回到面板（可能停在某跳转页或已回首页），重新进面板
+            if not is_coin_page(items):
+                open_coin_page()
+            items = ensure_welfare_panel()
+            if not items:
+                break
+
+        # 完成判定：任务是否还留在列表里（完成会自动消失）
+        remaining = [tt for _, _, tt in welfare_rows(items)]
+        if any(key in tt for tt in remaining):
+            failed[key] = failed.get(key, 0) + 1
+            log("  没完成，跳过下一个: " + title[:12])
+        else:
+            done += 1
+            log("  完成: " + title[:12])
+
+    close_panel()
+    log("  专享福利完成 %d 项" % done)
+    return done
+
+
+def scroll_panel_down():
+    """在任务面板（底部弹层）内向下滑动，露出更下方的福利任务。
+    面板内容区约 y=400~2330，在这里做小幅上滑即可。"""
+    adb("shell", "input", "swipe", "540", "2050", "540", "1450", "300")
+    time.sleep(1.5)
+
+
+def return_to_panel():
+    """从福利任务跳转页返回：连续按返回，直到回到任务面板或淘金币首页
+    （最多 3 次）。返回到首页也没关系，调用方会重新进面板。"""
+    for _ in range(3):
+        back(1, 2.5)
+        items = dismiss(screen())
+        if is_task_panel(items) or is_coin_page(items):
+            return items
+    return dismiss(screen())
+
+
+def close_panel():
+    """关掉任务面板回到淘金币页。面板是底部弹层，直接按返回键即可关掉并回到
+    淘金币页（比点右上角 X 更可靠，X 关掉后是回到淘宝首页而非淘金币页）。"""
+    items = dismiss(screen())
+    if not is_task_panel(items):
+        return
+    back(1, 3)
+    time.sleep(2)
+    items = dismiss(screen())
+    if is_task_panel(items):              # 兜底：返回没关掉就点 X
+        tap(1000, 235, "关任务面板X")
+        time.sleep(3)
+
+
 def get_focus_package():
     txt = adb("shell", "dumpsys", "window")
     for line in txt.splitlines():
@@ -589,6 +787,10 @@ def main():
             run_tasks()
         except Exception as e:
             log("  任务环节异常: %s" % e)
+        try:
+            run_welfare_tasks()
+        except Exception as e:
+            log("  专享福利环节异常: %s" % e)
 
     try:
         claim_rewards()

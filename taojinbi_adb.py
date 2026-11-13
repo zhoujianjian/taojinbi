@@ -29,6 +29,8 @@ import time
 import datetime
 import subprocess
 
+import devlink
+
 # 关键：控制台/重定向到文件时避免 GBK 编码崩溃
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -126,6 +128,11 @@ def adb(*args, timeout=30):
     except Exception as e:
         log("adb fail %s: %s" % (args, e))
         return ""
+
+
+def adb_list(args, timeout=30):
+    """给 devlink 用的列表式入口（设备自愈模块统一按 run([...]) 调用）"""
+    return adb(*args, timeout=timeout)
 
 
 def tap(x, y, name=""):
@@ -550,14 +557,9 @@ def claim_rewards():
 
 def main():
     log("=" * 46)
-    if "device" not in adb("devices"):
-        log("[X] 没有设备连接")
+    # 设备掉线自动重启 adb 服务，灭屏自动唤醒（见 devlink.py）
+    if not devlink.prepare(adb_list, log):
         return 2
-
-    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-    time.sleep(1)
-    adb("shell", "wm", "dismiss-keyguard")
-    time.sleep(1)
 
     if not open_coin_page():
         shot("fail_nav")

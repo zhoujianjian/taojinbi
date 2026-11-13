@@ -34,6 +34,8 @@ import datetime
 import subprocess
 import threading
 
+import devlink
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -435,6 +437,7 @@ def run_tasks():
     done = 0
     tried = {}                       # (x,y) 网格 → 已尝试次数，避免死磕点不动的任务
     for _ in range(14):
+        devlink.keep_awake(adb_run, log)     # 中途掉线/灭屏就地救一次
         items = back_to_task_page()
         if not items:
             log("  任务页丢失，结束浏览环节")
@@ -488,14 +491,9 @@ def run_tasks():
 
 def main():
     log("=" * 46)
-    if "device" not in adb_run(["devices"], timeout=20):
-        log("[X] 没有设备连接")
+    # 设备掉线自动重启 adb 服务，灭屏自动唤醒（见 devlink.py）
+    if not devlink.prepare(adb_run, log):
         return 2
-
-    adb_run(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], timeout=20)
-    time.sleep(1)
-    adb_run(["shell", "wm", "dismiss-keyguard"], timeout=20)
-    time.sleep(1)
 
     if not open_bean_page():
         shot("fail_nav")

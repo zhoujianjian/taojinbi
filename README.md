@@ -218,6 +218,35 @@ Unregister-ScheduledTask -TaskName "JD_Farm_Daily" -Confirm:$false
   需要把锁屏去掉或改为无密码
 - 如果电脑当时关机/睡眠，`StartWhenAvailable` 会在开机后补跑一次
 - 三个任务合计约 10~15 分钟，期间不要碰手机；错开 10 分钟是为了不抢 ADB
+- 设备掉线或手机灭屏，脚本自己会救（见下一节），不用手动干预
+
+## 手机掉线 / 灭屏的自愈
+
+无人值守跑定时任务，最常见的两种失败是「adb 里没有设备」和「手机灭屏截图全黑」。
+三个脚本启动时都会先走 `devlink.py` 的 `prepare()`：
+
+| 现象 | 处理 |
+|------|------|
+| `adb devices` 里没有设备 / 状态为 `offline` | 停服务（`adb kill-server`）→ 起服务（`adb start-server`）→ 等重连，最多 3 轮 |
+| 设备在但 `mWakefulness=Asleep` | `KEYCODE_WAKEUP` + `dismiss-keyguard`，再回读 `dumpsys power` 确认真的亮了 |
+| 长流程中途掉线或灭屏 | 每 90 秒检查一次（`keep_awake()`），就地重启服务 + 唤醒 |
+
+日志里会看到：
+
+```
+[0/4] 连接手机
+  adb 停服务
+  adb 起服务
+  设备已恢复: m7zphmemnnojojuk
+  屏幕没亮，唤醒（第 1 次）
+```
+
+实测结论（这台小米 2312DRAABC）：
+
+- **只重启 adb 服务不会让手机亮屏**，设备会重新连上，但状态还是 `Asleep`，
+  所以唤醒必须单独做（`input keyevent KEYCODE_WAKEUP`）
+- 唤醒后 `wm dismiss-keyguard` 就能到桌面，没设锁屏密码时不需要额外上滑
+- 手机灭屏时 adb 仍然可用，只是截图全黑——这是以前脚本"莫名失败"的主要原因
 
 ## 脚本行为细节
 
@@ -245,6 +274,7 @@ Unregister-ScheduledTask -TaskName "JD_Farm_Daily" -Confirm:$false
 | `taojinbi_adb.py` | 淘宝主脚本：导航 → 补领 → 签到 → 任务 → 领取 |
 | `jingdong.py` | 京东主脚本：签到卡 → 浏览任务 → 刮卡（独立，不依赖淘宝脚本）|
 | `jd_farm.py` | 东东农场主脚本：签到 → 浏览任务领水滴 → 浇水（复用 `jingdong.py` 基础层）|
+| `devlink.py` | 设备自愈：掉线重启 adb 服务、灭屏自动唤醒（三个脚本共用）|
 | `ocr.ps1` | Windows OCR 封装：输入截图路径，输出「文本 x y」 |
 | `run_taojinbi.bat` | 淘宝定时任务入口 |
 | `run_jingdong.bat` | 京东京豆定时任务入口 |
@@ -277,6 +307,11 @@ H5 活动页动效多，偶尔整页都识别不出来。脚本会重截 2~3 次
 **Q: 农场浇水只浇了两轮就停？**
 这是保护逻辑：连续两轮水滴数不下降，说明被浮层挡住或当天浇水已到上限，
 脚本会主动停止而不是空转 8 轮。看最新 `logs/farm_*.png` 截图确认页面状态。
+
+**Q: 定时任务没跑成功，日志里是「没有设备连接」？**
+脚本已经自己重启过 adb 服务三次还拿不到设备，说明是物理层断了：
+数据线松了、手机没电关机、或插在电脑的充电口（不传数据）。
+插好线后 `adb devices` 能看到设备再手动补跑一次即可。
 
 **Q: 换了手机 / 分辨率不一样？**
 大部分坐标是 OCR 现场算的，但有几个写死的兜底值需要按新分辨率换算：

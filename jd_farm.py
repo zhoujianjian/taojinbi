@@ -33,6 +33,7 @@ import datetime
 import threading
 
 import jingdong as base
+import devlink
 
 # 计划任务在共享控制台里跑，外部控制台事件（CTRL_C_EVENT）会误杀脚本。
 # 非交互环境下忽略 SIGINT，保证每天定时跑完；手动 Ctrl+C 仍可中断。
@@ -365,6 +366,7 @@ def do_tasks():
             log("  已达单次浏览上限 %d" % MAX_BROWSE)
             break
 
+        devlink.keep_awake(base.adb_run, log)    # 中途掉线/灭屏就地救一次
         # 面板刚打开时 OCR 可能抓到过渡画面，多确认一次再判定
         items = dismiss(screen())
         for __ in range(2):
@@ -454,6 +456,7 @@ def do_water():
     rounds = 0
     stalled = 0                              # 水滴连续不下降 = 被弹窗挡住或浇不动了
     for _ in range(MAX_WATER_ROUND):
+        devlink.keep_awake(base.adb_run, log)    # 中途掉线/灭屏就地救一次
         items = dismiss(screen())
         if not is_farm(items):
             items = ensure_farm()
@@ -494,14 +497,9 @@ def do_water():
 
 def main():
     log("=" * 46)
-    if "device" not in base.adb_run(["devices"], timeout=20):
-        log("[X] 没有设备连接")
+    # 设备掉线自动重启 adb 服务，灭屏自动唤醒（见 devlink.py）
+    if not devlink.prepare(base.adb_run, log):
         return 2
-
-    base.adb_run(["shell", "input", "keyevent", "KEYCODE_WAKEUP"], timeout=20)
-    time.sleep(1)
-    base.adb_run(["shell", "wm", "dismiss-keyguard"], timeout=20)
-    time.sleep(1)
 
     if not open_farm():
         shot("fail_nav")

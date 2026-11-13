@@ -170,32 +170,66 @@ python jd_farm.py --no-task
 
 ## 每天定时自动运行
 
-用 Windows 任务计划。**推荐用 PowerShell 注册**（比 `schtasks` 稳，
-某些安全策略会把 `schtasks.exe` 列入黑名单直接拦掉）。
+用 Windows 任务计划。三个任务都带**随机延迟**，每天不在同一分钟动手
+（`RandomDelay` 是任务计划自带的能力：到点后系统在窗口内随机挑一个时刻启动，
+所以不用改脚本、也不会因为脚本多睡几分钟占着控制台）：
 
-以管理员身份打开 PowerShell，粘贴执行（9:00 淘宝 / 9:10 京豆 / 9:20 农场，错开避免抢手机）：
+| 任务 | 触发时刻 | 随机范围 | 实际执行窗口 |
+|------|----------|----------|--------------|
+| `Taobao_Taojinbi_Daily` | 08:10 | `PT18M` | 08:10 ~ 08:28 |
+| `JD_Jingdou_Daily` | 09:01 | `PT3M` | 09:01 ~ 09:04 |
+| `JD_Farm_Daily` | 09:20 | 无 | 09:20 |
+
+**推荐用 PowerShell 注册**（比 `schtasks` 稳，某些安全策略会把 `schtasks.exe` 列入黑名单直接拦掉）。
+
+先建三个每天固定时刻的任务：
 
 ```powershell
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
-# 淘宝 9:00
+# 淘宝 08:10 / 京豆 09:01 / 农场 09:20，错开避免抢同一部手机
 Register-ScheduledTask -TaskName "Taobao_Taojinbi_Daily" `
   -Action (New-ScheduledTaskAction -Execute "D:\taojinbi\run_taojinbi.bat") `
-  -Trigger (New-ScheduledTaskTrigger -Daily -At 09:00) `
+  -Trigger (New-ScheduledTaskTrigger -Daily -At 08:10) `
   -Settings $settings -Force
 
-# 京东 9:10
 Register-ScheduledTask -TaskName "JD_Jingdou_Daily" `
   -Action (New-ScheduledTaskAction -Execute "D:\taojinbi\run_jingdong.bat") `
-  -Trigger (New-ScheduledTaskTrigger -Daily -At 09:10) `
+  -Trigger (New-ScheduledTaskTrigger -Daily -At 09:01) `
   -Settings $settings -Force
 
-# 东东农场 9:20
 Register-ScheduledTask -TaskName "JD_Farm_Daily" `
   -Action (New-ScheduledTaskAction -Execute "D:\taojinbi\run_jdfarm.bat") `
   -Trigger (New-ScheduledTaskTrigger -Daily -At 09:20) `
   -Settings $settings -Force
 ```
+
+`New-ScheduledTaskTrigger` 不支持随机延迟，得改一次 XML 再注册：
+
+```powershell
+function Add-RandomDelay($name, $start, $delay) {
+  $xml = Export-ScheduledTask -TaskName $name
+  $xml = $xml -replace '<StartBoundary>[^<]+</StartBoundary>', "<StartBoundary>$start</StartBoundary>"
+  $xml = $xml -replace '(<StartBoundary>[^<]+</StartBoundary>)', "`$1`r`n      <RandomDelay>$delay</RandomDelay>"
+  Register-ScheduledTask -Xml $xml -TaskName $name -Force
+}
+
+Add-RandomDelay "Taobao_Taojinbi_Daily" "2026-11-13T08:10:00+08:00" "PT18M"
+Add-RandomDelay "JD_Jingdou_Daily"      "2026-11-13T09:01:00+08:00" "PT3M"
+```
+
+`StartBoundary` 的日期部分不影响每日重复，只取时分。校验结果：
+
+```powershell
+foreach ($n in "Taobao_Taojinbi_Daily","JD_Jingdou_Daily") {
+  (Export-ScheduledTask -TaskName $n) -split "`n" | Select-String "StartBoundary|RandomDelay"
+  (Get-ScheduledTaskInfo -TaskName $n).NextRunTime     # 这个时间已经含随机结果
+}
+```
+
+想调窗口只改 `PT18M`（18 分钟）这个值：`PT6M` 就是 6 分钟窗口。
+随机延迟不算进 `ExecutionTimeLimit`，30 分钟的执行上限仍然从真正启动那刻算。
 
 （把 `D:\taojinbi\` 换成你实际存放本项目的目录）
 
@@ -217,7 +251,8 @@ Unregister-ScheduledTask -TaskName "JD_Farm_Daily" -Confirm:$false
 - 手机必须是解锁状态；设了锁屏密码的话脚本叫不醒它，
   需要把锁屏去掉或改为无密码
 - 如果电脑当时关机/睡眠，`StartWhenAvailable` 会在开机后补跑一次
-- 三个任务合计约 10~15 分钟，期间不要碰手机；错开 10 分钟是为了不抢 ADB
+- 三个任务合计约 10~15 分钟，期间不要碰手机；三个时间点错开是为了不抢同一部手机的 ADB
+- 随机延迟只改启动时刻，跑的内容完全一样，不影响收益
 - 设备掉线或手机灭屏，脚本自己会救（见下一节），不用手动干预
 
 ## 手机掉线 / 灭屏的自愈
@@ -266,6 +301,9 @@ Unregister-ScheduledTask -TaskName "JD_Farm_Daily" -Confirm:$false
 - **领取奖励**：只在淘金币页/任务面板里点「领取」，
   跳过「免费领取」「试用领取」这类会跳转广告页的按钮
 - **兜底**：找不到按钮会先按返回键重试，必要时重启淘宝重进
+- **定时任务防误杀**：计划任务跑在共享控制台里，外部控制台事件（`CTRL_C_EVENT`）
+  会把脚本当成手动 Ctrl+C 杀掉。三个脚本在非交互环境（`stdin` 不是终端）默认忽略
+  SIGINT，手动在命令行跑时 Ctrl+C 仍然有效
 
 ## 文件说明
 

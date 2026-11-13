@@ -26,10 +26,19 @@
 import os
 import sys
 import time
+import signal
 import datetime
 import subprocess
 
 import devlink
+
+# 计划任务在共享控制台里跑，外部控制台事件（CTRL_C_EVENT）会误杀脚本。
+# 非交互环境下忽略 SIGINT，保证每天定时跑完；手动 Ctrl+C 仍可中断。
+try:
+    if not sys.stdin.isatty():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+except Exception:
+    pass
 
 # 关键：控制台/重定向到文件时避免 GBK 编码崩溃
 try:
@@ -504,18 +513,25 @@ def get_focus_package():
 
 
 def ensure_taobao(max_back=4):
-    """确保回到淘宝前台（做任务会跳支付宝等外部 App）"""
-    for _ in range(max_back + 1):
-        pkg = get_focus_package()
-        if pkg == "com.taobao.taobao":
-            return True
-        log("  当前在 %s，返回淘宝" % (pkg or "unknown"))
-        back(1, 2.5)
+    """确保回到淘宝前台（做任务会跳支付宝等外部 App）
+
+    别的 App 在前台时按返回键基本是白按——京东的 BabelActivity 会把返回吃掉，
+    连按 5 次还在原地。所以只试一次返回，还不行就直接 monkey 拉起淘宝（约省 10 秒）。
+    """
     pkg = get_focus_package()
-    if pkg != "com.taobao.taobao":
-        adb("shell", "monkey", "-p", "com.taobao.taobao",
-            "-c", "android.intent.category.LAUNCHER", "1")
-        time.sleep(8)
+    if pkg == "com.taobao.taobao":
+        return True
+
+    if pkg:
+        log("  当前在 %s，先按一次返回" % pkg)
+        back(1, 2)
+        if get_focus_package() == "com.taobao.taobao":
+            return True
+
+    log("  直接拉起淘宝")
+    adb("shell", "monkey", "-p", "com.taobao.taobao",
+        "-c", "android.intent.category.LAUNCHER", "1")
+    time.sleep(8)
     return get_focus_package() == "com.taobao.taobao"
 
 
